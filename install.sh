@@ -334,51 +334,66 @@ if ! csf -r > /dev/null 2>&1; then
 fi
 echo -e "${GREEN}OK${NC}"
 
+# Apply knock rules — run csfpost.sh directly (CSF v14/CWP doesn't always auto-execute it)
+echo -n "Applying knock rules... "
+CSFPOST_ERR=$(bash /etc/csf/csfpost.sh 2>&1)
+CSFPOST_RC=$?
+if [ $CSFPOST_RC -ne 0 ]; then
+    echo -e "${RED}FAILED (exit $CSFPOST_RC):${NC}"
+    echo "$CSFPOST_ERR"
+    rollback
+    exit 1
+fi
+
 # Verify rules are in place
-echo -n "Verifying knock rules... "
 if iptables -L SSH_KNOCK -n 2>/dev/null | grep -q "$SSH_PORT"; then
     echo -e "${GREEN}OK${NC}"
 else
-    echo -e "${YELLOW}not found after csf -r, trying manual apply...${NC}"
-    # CSF may not have executed csfpost.sh — run it directly
-    CSFPOST_ERR=$(bash /etc/csf/csfpost.sh 2>&1)
-    CSFPOST_RC=$?
-    if [ $CSFPOST_RC -ne 0 ]; then
-        echo -e "${RED}csfpost.sh failed (exit $CSFPOST_RC):${NC}"
-        echo "$CSFPOST_ERR"
-        rollback
-        exit 1
-    fi
-    # Check again
-    if iptables -L SSH_KNOCK -n 2>/dev/null | grep -q "$SSH_PORT"; then
-        echo -e "${GREEN}OK (applied manually)${NC}"
-        echo -e "${YELLOW}Note: CSF did not run csfpost.sh automatically. Rules were applied manually.${NC}"
-        echo -e "${YELLOW}They will persist across CSF restarts only if csfpost.sh is executable.${NC}"
-    else
-        echo -e "${RED}FAILED — rules not applied even after manual run${NC}"
-        # Show what iptables says for debugging
-        echo "  iptables -L SSH_KNOCK output:"
-        iptables -L SSH_KNOCK -n 2>&1 | head -10
-        echo "  csfpost.sh output: $CSFPOST_ERR"
-        rollback
-        exit 1
-    fi
+    echo -e "${RED}FAILED — chain created but rules not matching${NC}"
+    echo "  iptables -L SSH_KNOCK output:"
+    iptables -L SSH_KNOCK -n 2>&1 | head -10
+    rollback
+    exit 1
 fi
 
-# Dead man's switch — safety net to restore SSH in 5 minutes
+# Install watchdog cron — re-applies rules if CSF restart wipes them
+echo -n "Installing watchdog cron... "
+WATCHDOG="$INSTALL_DIR/watchdog.sh"
+cat > "$WATCHDOG" << 'WDEOF'
+#!/bin/bash
+# SSH Knock watchdog — re-applies rules if CSF restart wiped them
+if ! /usr/sbin/iptables -L SSH_KNOCK -n >/dev/null 2>&1; then
+    if [ -f /etc/csf/csfpost.sh ] && grep -q '# === SSH Knock' /etc/csf/csfpost.sh; then
+        /bin/bash /etc/csf/csfpost.sh >/dev/null 2>&1
+    fi
+fi
+WDEOF
+chmod 755 "$WATCHDOG"
+# Add cron entry (every minute)
+(crontab -l 2>/dev/null | grep -v 'ssh-knock.*watchdog'; echo "* * * * * $WATCHDOG # ssh-knock-watchdog") | crontab -
+echo -e "${GREEN}OK${NC}"
+
+# Dead man's switch — safety net to restore SSH in 15 minutes
 SAFETY_SCRIPT="$INSTALL_DIR/safety-restore.sh"
 cat > "$SAFETY_SCRIPT" << 'SAFETYEOF'
 #!/bin/bash
-# Emergency: restore SSH access
-cp /opt/ssh-knock/csf.conf.backup /etc/csf/csf.conf
-sed -i '/# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh
+# Emergency: restore SSH access and remove all SSH Knock components
+if [ -f /opt/ssh-knock/csf.conf.backup ]; then
+    cp /opt/ssh-knock/csf.conf.backup /etc/csf/csf.conf
+fi
+sed -i '/# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh 2>/dev/null
+# Remove watchdog cron and safety cron
+crontab -l 2>/dev/null | grep -v "ssh-knock" | crontab -
+# Flush knock chains
+iptables -F SSH_KNOCK 2>/dev/null; iptables -F SSH_KNOCK_S2 2>/dev/null; iptables -F SSH_KNOCK_S3 2>/dev/null
+iptables -D INPUT -j SSH_KNOCK 2>/dev/null; iptables -X SSH_KNOCK 2>/dev/null
+iptables -X SSH_KNOCK_S2 2>/dev/null; iptables -X SSH_KNOCK_S3 2>/dev/null
 csf -r >/dev/null 2>&1
 rm -f /opt/ssh-knock/safety-restore.sh
-crontab -l 2>/dev/null | grep -v "ssh-knock.*safety" | crontab -
 SAFETYEOF
 chmod 755 "$SAFETY_SCRIPT"
-# Schedule safety restore in 5 minutes
-(crontab -l 2>/dev/null; echo "$(date -d '+5 minutes' '+%M %H %d %m *') $SAFETY_SCRIPT # ssh-knock-safety") | crontab -
+# Schedule safety restore in 15 minutes
+(crontab -l 2>/dev/null | grep -v 'ssh-knock.*safety'; echo "$(date -d '+15 minutes' '+%M %H %d %m *') $SAFETY_SCRIPT # ssh-knock-safety") | crontab -
 
 # Verify existing session is still alive (if we got here, it is)
 echo ""
@@ -386,8 +401,8 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Installation Complete!                 ${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo -e "${RED}>>> SAFETY NET ACTIVE <<<${NC}"
-echo -e "${YELLOW}SSH will be restored automatically in 5 minutes if you do not cancel.${NC}"
+echo -e "${RED}>>> SAFETY NET ACTIVE — 15 MINUTES <<<${NC}"
+echo -e "${YELLOW}SSH will be restored automatically in 15 minutes if you do not cancel.${NC}"
 echo "After testing knock successfully, cancel the safety net:"
 echo ""
 echo "  crontab -l | grep -v 'ssh-knock.*safety' | crontab -"
