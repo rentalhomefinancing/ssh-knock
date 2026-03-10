@@ -328,7 +328,7 @@ sed -i "s/__SSH_PORT__/$SSH_PORT/g" "$INSTALL_DIR/clients/knock.sh"
 sed -i "s/__KNOCK1__/$KNOCK1/g" "$INSTALL_DIR/clients/knock.sh"
 sed -i "s/__KNOCK2__/$KNOCK2/g" "$INSTALL_DIR/clients/knock.sh"
 sed -i "s/__KNOCK3__/$KNOCK3/g" "$INSTALL_DIR/clients/knock.sh"
-chmod 700 "$INSTALL_DIR/clients/knock.sh"
+chmod 644 "$INSTALL_DIR/clients/knock.sh"
 
 # Windows PowerShell client
 cat > "$INSTALL_DIR/clients/knock.ps1" << 'PSEOF'
@@ -385,7 +385,7 @@ for gui in knock-gui.py knock-gui.ps1; do
         sed -i "s/__KNOCK2__/$KNOCK2/g" "$INSTALL_DIR/clients/$gui"
         sed -i "s/__KNOCK3__/$KNOCK3/g" "$INSTALL_DIR/clients/$gui"
         sed -i "s/__HOSTNAME__/$(hostname)/g" "$INSTALL_DIR/clients/$gui"
-        chmod 700 "$INSTALL_DIR/clients/$gui"
+        chmod 644 "$INSTALL_DIR/clients/$gui"
     fi
 done
 

@@ -186,7 +186,7 @@ regenerate_from_templates() {
             -e "s/%%HOSTNAME%%/$HOSTNAME_VAL/g" \
             "$tpl" > "$out"
 
-        chmod 700 "$out"
+        chmod 644 "$out"
     done
 }
 
@@ -201,7 +201,7 @@ regenerate_via_sed_fallback() {
             -e "s/\b${OLD_KNOCK3}\b/${NEW_KNOCK3}/g" \
             "$client_file"
 
-        chmod 700 "$client_file"
+        chmod 644 "$client_file"
     done
 }
 
