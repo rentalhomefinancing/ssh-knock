@@ -60,6 +60,19 @@ KNOCK1=$(grep '^KNOCK1=' "$INSTALL_DIR/config" | cut -d= -f2)
 KNOCK2=$(grep '^KNOCK2=' "$INSTALL_DIR/config" | cut -d= -f2)
 KNOCK3=$(grep '^KNOCK3=' "$INSTALL_DIR/config" | cut -d= -f2)
 
+# Validate config values are non-empty and numeric
+for var_name in SSH_PORT KNOCK1 KNOCK2 KNOCK3; do
+    eval val=\$$var_name
+    if [ -z "$val" ]; then
+        echo -e "${RED}Error: $var_name not found in $INSTALL_DIR/config${NC}"
+        exit 1
+    fi
+    if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: $var_name has non-numeric value: $val${NC}"
+        exit 1
+    fi
+done
+
 echo "SSH Knock config detected:"
 echo "  SSH port:        $SSH_PORT"
 echo "  Knock sequence:  $KNOCK1 > $KNOCK2 > $KNOCK3"
@@ -117,10 +130,10 @@ for client in knock.sh knock.ps1 knock-gui.py knock-gui.ps1; do
         tpl="$INSTALL_DIR/templates/${client}.tpl"
         # Read the client script and replace current port values with placeholders
         sed \
-            -e "s/${KNOCK1}/%%KNOCK1%%/g" \
-            -e "s/${KNOCK2}/%%KNOCK2%%/g" \
-            -e "s/${KNOCK3}/%%KNOCK3%%/g" \
-            -e "s/${SSH_PORT}/%%SSH_PORT%%/g" \
+            -e "s/\b${SSH_PORT}\b/%%SSH_PORT%%/g" \
+            -e "s/\b${KNOCK1}\b/%%KNOCK1%%/g" \
+            -e "s/\b${KNOCK2}\b/%%KNOCK2%%/g" \
+            -e "s/\b${KNOCK3}\b/%%KNOCK3%%/g" \
             "$src" > "$tpl"
         chmod 644 "$tpl"
     fi
@@ -143,7 +156,7 @@ echo -e "${GREEN}OK${NC}"
 
 echo -n "Adding menu entry to CWP... "
 if ! grep -q 'module=ssh_knock' "$THIRDPARTY"; then
-    echo '<!-- SSH_KNOCK_START --><li><a href="index.php?module=ssh_knock"><span class="icon16 icomoon-icon-lock"></span>SSH Knock</a></li><!-- SSH_KNOCK_END -->' >> "$THIRDPARTY"
+    printf '\n<!-- SSH_KNOCK_START --><li><a href="index.php?module=ssh_knock"><span class="icon16 icomoon-icon-lock"></span>SSH Knock</a></li><!-- SSH_KNOCK_END -->\n' >> "$THIRDPARTY"
     echo -e "${GREEN}OK${NC}"
 else
     echo -e "${YELLOW}already present${NC}"

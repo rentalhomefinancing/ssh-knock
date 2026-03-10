@@ -19,6 +19,12 @@ $allowedClients = [
 ];
 
 if (isset($_GET['download'])) {
+    // Auth guard: verify CWP admin session before serving files
+    if (session_status() === PHP_SESSION_NONE) session_start();
+    if (empty($_SESSION)) {
+        http_response_code(403);
+        exit('Forbidden — no active session.');
+    }
     while (ob_get_level()) ob_end_clean();
     $file = basename($_GET['download']);
     if (!array_key_exists($file, $allowedClients)) {
@@ -30,13 +36,12 @@ if (isset($_GET['download'])) {
         http_response_code(404);
         exit('File not found.');
     }
-    $content = file_get_contents($path);
     header('Content-Type: ' . $allowedClients[$file]['mime']);
     header('Content-Disposition: attachment; filename="' . $file . '"');
-    header('Content-Length: ' . strlen($content));
+    header('Content-Length: ' . filesize($path));
     header('Cache-Control: no-cache, no-store, must-revalidate');
     header('X-Content-Type-Options: nosniff');
-    echo $content;
+    readfile($path);
     exit;
 }
 
@@ -51,10 +56,9 @@ $csrf = $_SESSION['sshk_csrf'];
 // ── Helper Functions ─────────────────────────────────────────────────────
 
 // Whitelisted config keys (only these are parsed and returned)
-$KNOWN_KEYS = ['SSH_PORT', 'KNOCK1', 'KNOCK2', 'KNOCK3', 'KNOCK_TIMEOUT', 'ACCESS_TIMEOUT'];
+const SSHK_KNOWN_KEYS = ['SSH_PORT', 'KNOCK1', 'KNOCK2', 'KNOCK3', 'KNOCK_TIMEOUT', 'ACCESS_TIMEOUT'];
 
 function sshk_parseConfig(): array {
-    global $KNOWN_KEYS;
     $path = '/opt/ssh-knock/config';
     if (!file_exists($path)) return [];
     $cfg = [];
@@ -66,7 +70,7 @@ function sshk_parseConfig(): array {
         $key = trim($key);
         $val = trim($val);
         // Only accept known config keys with numeric values
-        if (in_array($key, $KNOWN_KEYS, true) && ctype_digit($val)) {
+        if (in_array($key, SSHK_KNOWN_KEYS, true) && ctype_digit($val)) {
             $cfg[$key] = (int) $val;
         }
     }
@@ -100,7 +104,11 @@ function sshk_auditLog(int $n = 20): string {
 
 function sshk_audit(string $msg): void {
     $ts = date('Y-m-d H:i:s T');
-    @file_put_contents('/opt/ssh-knock/audit.log', "[$ts] $msg\n", FILE_APPEND);
+    $msg = str_replace(["\r", "\n"], ' ', $msg);
+    $written = file_put_contents('/opt/ssh-knock/audit.log', "[$ts] $msg\n", FILE_APPEND);
+    if ($written === false) {
+        error_log("SSH Knock: failed to write audit log");
+    }
 }
 
 function sshk_hasSafetyRevert(): bool {
@@ -173,6 +181,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sshk_action'])) {
                 break;
 
             case 'uninstall_knock':
+                if (($_POST['uninstall_confirm'] ?? '') !== 'UNINSTALL') {
+                    $msg = 'Type UNINSTALL to confirm.';
+                    $msgType = 'danger';
+                    break;
+                }
                 if (file_exists('/opt/ssh-knock/uninstall.sh')) {
                     $out = shell_exec('bash /opt/ssh-knock/uninstall.sh --yes 2>&1');
                     $msg = 'SSH Knock uninstalled. SSH port is now open normally through CSF.';
@@ -188,6 +201,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sshk_action'])) {
                 $msg = 'Unknown action.';
                 $msgType = 'danger';
         }
+        // Validate msgType
+        $validTypes = ['success', 'danger', 'warning', 'info'];
+        $msgType = in_array($msgType, $validTypes, true) ? $msgType : 'danger';
         // Rotate CSRF token after action
         $_SESSION['sshk_csrf'] = bin2hex(random_bytes(32));
         $csrf = $_SESSION['sshk_csrf'];
@@ -550,6 +566,7 @@ $auditLogs = $installed ? sshk_auditLog() : '';
                 <form method="post" style="display:inline;" id="sshk-uninstall-form">
                     <input type="hidden" name="sshk_csrf" value="<?= htmlspecialchars($csrf) ?>">
                     <input type="hidden" name="sshk_action" value="uninstall_knock">
+                    <input type="hidden" name="uninstall_confirm" id="sshk-uninstall-confirm-hidden" value="">
                     <button type="submit" class="btn btn-danger" id="sshk-uninstall-btn" disabled>
                         <span class="glyphicon glyphicon-trash"></span> Uninstall
                     </button>
@@ -564,9 +581,12 @@ $auditLogs = $installed ? sshk_auditLog() : '';
 (function() {
     var input = document.getElementById('sshk-uninstall-confirm');
     var btn = document.getElementById('sshk-uninstall-btn');
-    if (input && btn) {
+    var hidden = document.getElementById('sshk-uninstall-confirm-hidden');
+    if (input && btn && hidden) {
         input.addEventListener('input', function() {
-            btn.disabled = (this.value.trim() !== 'UNINSTALL');
+            var val = this.value.trim();
+            btn.disabled = (val !== 'UNINSTALL');
+            hidden.value = val;
         });
     }
 

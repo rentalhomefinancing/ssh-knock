@@ -85,7 +85,7 @@ echo ""
 # --- Confirm unless --yes ---
 
 if [ "$AUTO_YES" != "true" ]; then
-    read -p "Proceed? [y/N]: " CONFIRM
+    read -p "Proceed? [y/N]: " CONFIRM || CONFIRM=""
     if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
         echo "Uninstall cancelled."
         exit 0
@@ -217,12 +217,6 @@ fi
 echo -n "Cleaning up backup directory... "
 rmdir "$INSTALL_DIR/backups" 2>/dev/null && echo -e "${GREEN}OK${NC}" || echo -e "${YELLOW}skipped (not empty or missing)${NC}"
 
-# Remove uninstall script itself (last action)
-if [ "$SKIP_SELF" = "true" ] && [ -f "$SELF_SCRIPT" ]; then
-    rm -f "$SELF_SCRIPT"
-    echo -e "Removed: ${GREEN}$SELF_SCRIPT${NC}"
-fi
-
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  CWP Module Uninstalled                ${NC}"
@@ -230,3 +224,8 @@ echo -e "${GREEN}========================================${NC}"
 echo ""
 echo "CWP module uninstalled. SSH Knock itself is NOT affected."
 echo ""
+
+# Remove uninstall script itself (absolute last action)
+if [ "$SKIP_SELF" = "true" ] && [ -f "$SELF_SCRIPT" ]; then
+    rm -f "$SELF_SCRIPT"
+fi

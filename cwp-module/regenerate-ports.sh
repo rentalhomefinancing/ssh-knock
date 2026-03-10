@@ -75,6 +75,13 @@ if [ -z "$SSH_PORT" ] || [ -z "$OLD_KNOCK1" ] || [ -z "$OLD_KNOCK2" ] || [ -z "$
     die "Incomplete config — missing SSH_PORT or KNOCK ports"
 fi
 
+# Validate all values are numeric
+for val in "$SSH_PORT" "$OLD_KNOCK1" "$OLD_KNOCK2" "$OLD_KNOCK3"; do
+    if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+        die "Config contains non-numeric port value: $val"
+    fi
+done
+
 # =============================================================================
 # Generate 3 new unique random ports
 # =============================================================================
@@ -120,9 +127,9 @@ generate_port() {
     done
 }
 
-NEW_KNOCK1=$(generate_port)
-NEW_KNOCK2=$(generate_port "$NEW_KNOCK1")
-NEW_KNOCK3=$(generate_port "$NEW_KNOCK1" "$NEW_KNOCK2")
+NEW_KNOCK1=$(generate_port "$OLD_KNOCK1" "$OLD_KNOCK2" "$OLD_KNOCK3")
+NEW_KNOCK2=$(generate_port "$NEW_KNOCK1" "$OLD_KNOCK1" "$OLD_KNOCK2" "$OLD_KNOCK3")
+NEW_KNOCK3=$(generate_port "$NEW_KNOCK1" "$NEW_KNOCK2" "$OLD_KNOCK1" "$OLD_KNOCK2" "$OLD_KNOCK3")
 
 # =============================================================================
 # Back up current config
@@ -132,6 +139,12 @@ cp "$CONFIG" "$INSTALL_DIR/config.pre-regenerate"
 # =============================================================================
 # Stop daemon
 # =============================================================================
+# ERR trap: if anything fails after daemon stop, rollback automatically
+trap 'audit "ROLLBACK: unexpected script exit"; \
+      cp "$INSTALL_DIR/config.pre-regenerate" "$CONFIG" 2>/dev/null; \
+      systemctl start ssh-knock 2>/dev/null; \
+      die "Unexpected error — rolled back to previous config"' ERR
+
 systemctl stop ssh-knock || die "Failed to stop ssh-knock daemon"
 
 # =============================================================================
@@ -183,9 +196,9 @@ regenerate_via_sed_fallback() {
         [ -f "$client_file" ] || continue
 
         sed -i \
-            -e "s/${OLD_KNOCK1}/${NEW_KNOCK1}/g" \
-            -e "s/${OLD_KNOCK2}/${NEW_KNOCK2}/g" \
-            -e "s/${OLD_KNOCK3}/${NEW_KNOCK3}/g" \
+            -e "s/\b${OLD_KNOCK1}\b/${NEW_KNOCK1}/g" \
+            -e "s/\b${OLD_KNOCK2}\b/${NEW_KNOCK2}/g" \
+            -e "s/\b${OLD_KNOCK3}\b/${NEW_KNOCK3}/g" \
             "$client_file"
 
         chmod 700 "$client_file"
@@ -232,12 +245,22 @@ if ! systemctl start ssh-knock; then
     die "Daemon failed to start with new ports. Rolled back to previous config."
 fi
 
-# =============================================================================
-# Health check
-# =============================================================================
-sleep 2
+# Clear ERR trap — daemon started successfully
+trap - ERR
 
-if [ "$(systemctl is-active ssh-knock)" != "active" ]; then
+# =============================================================================
+# Health check (retry loop instead of fixed sleep)
+# =============================================================================
+HEALTH_OK=false
+for i in 1 2 3 4 5; do
+    sleep 1
+    if [ "$(systemctl is-active ssh-knock)" = "active" ]; then
+        HEALTH_OK=true
+        break
+    fi
+done
+
+if [ "$HEALTH_OK" != "true" ]; then
     # Rollback
     audit "ROLLBACK: daemon not active after health check (ports: $NEW_KNOCK1 > $NEW_KNOCK2 > $NEW_KNOCK3)"
     systemctl stop ssh-knock 2>/dev/null || true
@@ -272,8 +295,16 @@ cat > "$REVERT_SCRIPT" << 'REVERTEOF'
 #!/bin/bash
 # Auto-revert: restore pre-regenerate SSH Knock config
 # Created by regenerate-ports.sh dead-man's switch
-set -euo pipefail
+set +e  # Recovery script — must not abort on errors
 INSTALL_DIR="/opt/ssh-knock"
+# Staleness check — don't revert if backup is more than 30 minutes old
+CREATED=$(stat -c %Y "$INSTALL_DIR/config.pre-regenerate" 2>/dev/null || echo 0)
+NOW=$(date +%s)
+if [ $(( NOW - CREATED )) -gt 1800 ]; then
+    crontab -l 2>/dev/null | grep -v 'ssh-knock-regen-safety' | crontab - 2>/dev/null
+    rm -f "$INSTALL_DIR/revert-regen.sh"
+    exit 0
+fi
 if [ -f "$INSTALL_DIR/config.pre-regenerate" ]; then
     systemctl stop ssh-knock 2>/dev/null || true
     cp "$INSTALL_DIR/config.pre-regenerate" "$INSTALL_DIR/config"
@@ -287,7 +318,7 @@ REVERTEOF
 chmod 755 "$REVERT_SCRIPT"
 
 # Remove any previous safety cron, then schedule revert in 5 minutes
-REVERT_TIME=$(date -d '+5 minutes' '+%M %H %d %m *')
+REVERT_TIME=$(date -d '+15 minutes' '+%M %H %d %m *')
 (crontab -l 2>/dev/null | grep -v 'ssh-knock-regen-safety'; echo "$REVERT_TIME $REVERT_SCRIPT # ssh-knock-regen-safety") | crontab -
 
 # =============================================================================
@@ -300,6 +331,6 @@ audit "REGENERATE: old=$OLD_KNOCK1,$OLD_KNOCK2,$OLD_KNOCK3 new=$NEW_KNOCK1,$NEW_
 # =============================================================================
 echo "OK: Ports regenerated. New sequence: $NEW_KNOCK1 > $NEW_KNOCK2 > $NEW_KNOCK3"
 echo ""
-echo "SAFETY: Auto-revert scheduled in 5 minutes."
+echo "SAFETY: Auto-revert scheduled in 15 minutes."
 echo "After confirming the new ports work, cancel the safety revert:"
 echo "  crontab -l | grep -v 'ssh-knock-regen-safety' | crontab -"
