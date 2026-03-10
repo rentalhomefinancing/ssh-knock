@@ -59,9 +59,9 @@ if ! command -v csf &>/dev/null; then
     exit 1
 fi
 
-# Check tcpdump
-if ! command -v tcpdump &>/dev/null; then
-    echo -e "${RED}Error: tcpdump not found. Install it: yum install tcpdump${NC}"
+# Check Python 3
+if ! command -v python3 &>/dev/null; then
+    echo -e "${RED}Error: python3 not found${NC}"
     exit 1
 fi
 
