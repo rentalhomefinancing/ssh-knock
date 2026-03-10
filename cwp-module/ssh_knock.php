@@ -9,7 +9,7 @@
  * Part of the ssh-knock project
  */
 
-// ── File Download Handler (before any HTML output) ───────────────────────
+// ── Client file whitelist ────────────────────────────────────────────────
 
 $allowedClients = [
     'knock.sh'      => ['mime' => 'application/x-sh',          'desc' => 'Linux/macOS CLI'],
@@ -18,40 +18,17 @@ $allowedClients = [
     'knock-gui.ps1' => ['mime' => 'application/octet-stream',  'desc' => 'Windows GUI'],
 ];
 
-if (isset($_GET['download'])) {
-    // Auth guard: verify CWP admin session before serving files
-    if (session_status() === PHP_SESSION_NONE) session_start();
-    if (empty($_SESSION)) {
-        http_response_code(403);
-        exit('Forbidden — no active session.');
-    }
-    while (ob_get_level()) ob_end_clean();
-    $file = basename($_GET['download']);
-    if (!array_key_exists($file, $allowedClients)) {
-        http_response_code(400);
-        exit('Invalid file.');
-    }
-    $path = '/opt/ssh-knock/clients/' . $file;
-    if (!file_exists($path)) {
-        http_response_code(404);
-        exit('File not found.');
-    }
-    header('Content-Type: ' . $allowedClients[$file]['mime']);
-    header('Content-Disposition: attachment; filename="' . $file . '"');
-    header('Content-Length: ' . filesize($path));
-    header('Cache-Control: no-cache, no-store, must-revalidate');
-    header('X-Content-Type-Options: nosniff');
-    readfile($path);
-    exit;
-}
+// ── CSRF (file-based — CWP does not use PHP sessions) ───────────────────
+// CWP includes modules after sending output, so session_start() is not
+// possible. We use a file-based token instead.
 
-// ── Session & CSRF ───────────────────────────────────────────────────────
-
-if (session_status() === PHP_SESSION_NONE) session_start();
-if (empty($_SESSION['sshk_csrf'])) {
-    $_SESSION['sshk_csrf'] = bin2hex(random_bytes(32));
+$csrfFile = '/opt/ssh-knock/.csrf_token';
+if (!file_exists($csrfFile) || !is_readable($csrfFile) || strlen(trim(file_get_contents($csrfFile))) !== 64) {
+    $token = bin2hex(random_bytes(32));
+    file_put_contents($csrfFile, $token);
+    chmod($csrfFile, 0600);
 }
-$csrf = $_SESSION['sshk_csrf'];
+$csrf = trim(file_get_contents($csrfFile));
 
 // ── Helper Functions ─────────────────────────────────────────────────────
 
@@ -205,8 +182,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sshk_action'])) {
         $validTypes = ['success', 'danger', 'warning', 'info'];
         $msgType = in_array($msgType, $validTypes, true) ? $msgType : 'danger';
         // Rotate CSRF token after action
-        $_SESSION['sshk_csrf'] = bin2hex(random_bytes(32));
-        $csrf = $_SESSION['sshk_csrf'];
+        $csrf = bin2hex(random_bytes(32));
+        file_put_contents($csrfFile, $csrf);
     }
 }
 
@@ -448,25 +425,59 @@ $auditLogs = $installed ? sshk_auditLog() : '';
                 'knock-gui.py'  => ['icon' => '&#128424;', 'color' => '#8e44ad'],
                 'knock-gui.ps1' => ['icon' => '&#128424;', 'color' => '#2c3e50'],
             ];
+            // Pre-encode client files as base64 for JS blob downloads
+            $clientData = [];
+            foreach ($clients as $c) {
+                $path = '/opt/ssh-knock/clients/' . $c;
+                if (is_readable($path)) {
+                    $clientData[$c] = base64_encode(file_get_contents($path));
+                }
+            }
             foreach ($clients as $c):
                 $meta = $allowedClients[$c] ?? ['desc' => $c];
                 $ic = $icons[$c] ?? ['icon' => '&#128196;', 'color' => '#555'];
+                $hasData = isset($clientData[$c]);
             ?>
                 <div class="col-md-3 col-sm-6">
                     <div class="sshk-dl-card" style="border-left: 3px solid <?= $ic['color'] ?>;">
                         <div class="dl-icon"><?= $ic['icon'] ?></div>
                         <div class="dl-name"><?= htmlspecialchars($c) ?></div>
                         <div class="dl-desc"><?= htmlspecialchars($meta['desc']) ?></div>
-                        <a href="index.php?module=ssh_knock&download=<?= urlencode($c) ?>"
-                           class="btn btn-default btn-xs">
+                        <?php if ($hasData): ?>
+                        <button type="button" class="btn btn-default btn-xs"
+                                onclick="sshkDownload('<?= htmlspecialchars($c) ?>')">
                             <span class="glyphicon glyphicon-download-alt"></span> Download
-                        </a>
+                        </button>
+                        <?php else: ?>
+                        <button type="button" class="btn btn-default btn-xs" disabled
+                                title="File not readable on server">
+                            <span class="glyphicon glyphicon-ban-circle"></span> Unavailable
+                        </button>
+                        <?php endif; ?>
                     </div>
                 </div>
             <?php endforeach; ?>
             </div>
         </div>
     </div>
+    <!-- Base64 client data for JS blob downloads -->
+    <script>
+    var sshkClientFiles = <?= json_encode($clientData) ?>;
+    function sshkDownload(name) {
+        var b64 = sshkClientFiles[name];
+        if (!b64) { alert('File not available.'); return; }
+        var raw = atob(b64);
+        var arr = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+        var blob = new Blob([arr], { type: 'application/octet-stream' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+    </script>
     <?php endif; ?>
 
     <!-- ─── Logs ────────────────────────────────────────────────────── -->
