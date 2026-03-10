@@ -480,6 +480,133 @@ $auditLogs = $installed ? sshk_auditLog() : '';
     </script>
     <?php endif; ?>
 
+    <!-- ─── Client Setup Guide ─────────────────────────────────────── -->
+    <div class="panel panel-default sshk-section">
+        <div class="panel-heading">
+            <strong>Client Setup Guide</strong>
+            <span class="label label-info pull-right" style="margin-top:2px;">After downloading, follow these steps</span>
+        </div>
+        <div class="panel-body">
+            <p style="color:#888; margin-bottom:16px;">
+                Each client has the knock sequence and server address baked in. Download, set up, and run &mdash; it knocks then auto-connects via SSH.
+            </p>
+
+            <!-- Linux/macOS CLI -->
+            <div class="panel panel-default" style="margin-bottom:12px;">
+                <div class="panel-heading" style="padding:8px 14px; cursor:pointer;" data-toggle="collapse" data-target="#guide-sh">
+                    <strong style="color:#27ae60;">&#128427; knock.sh</strong> &mdash; Linux / macOS Terminal
+                    <span class="glyphicon glyphicon-chevron-down pull-right" style="color:#999;"></span>
+                </div>
+                <div id="guide-sh" class="panel-collapse collapse">
+                    <div class="panel-body" style="font-size:13px;">
+                        <p><strong>Requirements:</strong> Bash (pre-installed on Linux and macOS)</p>
+                        <p><strong>Setup:</strong></p>
+<pre style="background:#1a1a2e; color:#16c784; padding:12px; border-radius:6px; font-size:12px;">
+# Make it executable
+chmod +x knock.sh
+
+# Run it
+./knock.sh yourserver.com
+
+# With a specific SSH user
+./knock.sh yourserver.com admin</pre>
+                        <p style="margin-top:8px;">The script sends the 3-port knock sequence, waits 1 second, then opens an SSH connection in your current terminal. If no username is provided, it defaults to <code>root</code>.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Windows CLI -->
+            <div class="panel panel-default" style="margin-bottom:12px;">
+                <div class="panel-heading" style="padding:8px 14px; cursor:pointer;" data-toggle="collapse" data-target="#guide-ps1">
+                    <strong style="color:#2980b9;">&#128187; knock.ps1</strong> &mdash; Windows PowerShell Terminal
+                    <span class="glyphicon glyphicon-chevron-down pull-right" style="color:#999;"></span>
+                </div>
+                <div id="guide-ps1" class="panel-collapse collapse">
+                    <div class="panel-body" style="font-size:13px;">
+                        <p><strong>Requirements:</strong> PowerShell 3.0+ and OpenSSH or PuTTY</p>
+                        <p><strong>First-time setup</strong> (if scripts are blocked):</p>
+<pre style="background:#1a1a2e; color:#16c784; padding:12px; border-radius:6px; font-size:12px;">
+# Allow running local scripts (one-time)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser</pre>
+                        <p><strong>Run:</strong></p>
+<pre style="background:#1a1a2e; color:#16c784; padding:12px; border-radius:6px; font-size:12px;">
+# Basic usage
+.\knock.ps1 -HostName yourserver.com
+
+# With a specific SSH user
+.\knock.ps1 -HostName yourserver.com -User admin</pre>
+                        <p style="margin-top:8px;">Sends the knock sequence then connects via <code>ssh.exe</code> (Windows 10 1803+) or PuTTY if installed. Defaults to user <code>root</code>.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Linux/macOS GUI -->
+            <div class="panel panel-default" style="margin-bottom:12px;">
+                <div class="panel-heading" style="padding:8px 14px; cursor:pointer;" data-toggle="collapse" data-target="#guide-guipy">
+                    <strong style="color:#8e44ad;">&#128424; knock-gui.py</strong> &mdash; Linux / macOS / Windows GUI
+                    <span class="glyphicon glyphicon-chevron-down pull-right" style="color:#999;"></span>
+                </div>
+                <div id="guide-guipy" class="panel-collapse collapse">
+                    <div class="panel-body" style="font-size:13px;">
+                        <p><strong>Requirements:</strong> Python 3.6+ with tkinter</p>
+                        <p><strong>Install tkinter</strong> (if not already installed):</p>
+<pre style="background:#1a1a2e; color:#16c784; padding:12px; border-radius:6px; font-size:12px;">
+# Debian / Ubuntu
+sudo apt install python3-tk
+
+# Fedora / RHEL / CentOS
+sudo dnf install python3-tkinter
+
+# macOS (Homebrew)
+brew install python-tk
+
+# Windows: reinstall Python from python.org
+# and check "tcl/tk and IDLE" during install</pre>
+                        <p><strong>Run:</strong></p>
+<pre style="background:#1a1a2e; color:#16c784; padding:12px; border-radius:6px; font-size:12px;">
+# Linux / macOS
+chmod +x knock-gui.py
+./knock-gui.py
+
+# Or run with Python directly (any platform)
+python3 knock-gui.py</pre>
+                        <p style="margin-top:8px;">Opens a GUI window with hostname and username fields pre-filled. Click <strong>Knock &amp; Connect</strong> to send the sequence and auto-launch SSH in your native terminal (gnome-terminal, iTerm2, Terminal.app, cmd.exe, etc.).</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Windows GUI -->
+            <div class="panel panel-default" style="margin-bottom:0;">
+                <div class="panel-heading" style="padding:8px 14px; cursor:pointer;" data-toggle="collapse" data-target="#guide-guips1">
+                    <strong style="color:#2c3e50;">&#128424; knock-gui.ps1</strong> &mdash; Windows GUI
+                    <span class="glyphicon glyphicon-chevron-down pull-right" style="color:#999;"></span>
+                </div>
+                <div id="guide-guips1" class="panel-collapse collapse">
+                    <div class="panel-body" style="font-size:13px;">
+                        <p><strong>Requirements:</strong> Windows 10+ with PowerShell 3.0+ (built-in)</p>
+                        <p><strong>Run:</strong></p>
+<pre style="background:#1a1a2e; color:#16c784; padding:12px; border-radius:6px; font-size:12px;">
+# Option 1: Right-click the file > "Run with PowerShell"
+
+# Option 2: From a PowerShell terminal
+.\knock-gui.ps1</pre>
+                        <p style="margin-top:8px;">If you see a security prompt, choose <strong>"Run once"</strong> or set the execution policy:</p>
+<pre style="background:#1a1a2e; color:#16c784; padding:12px; border-radius:6px; font-size:12px;">
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser</pre>
+                        <p style="margin-top:8px;">Opens a native Windows GUI with hostname and username fields. Click <strong>Knock &amp; Connect</strong> to knock and auto-launch SSH via OpenSSH or PuTTY. Shows a progress bar during the knock sequence.</p>
+                    </div>
+                </div>
+            </div>
+
+            <hr style="margin:18px 0 12px;">
+            <p style="color:#888; font-size:12px; margin:0;">
+                <span class="glyphicon glyphicon-info-sign"></span>
+                <strong>After port regeneration</strong>, all existing client scripts become invalid. Download fresh copies from the cards above.
+                The knock sequence is embedded in each script &mdash; there is no external config file.
+            </p>
+        </div>
+    </div>
+
     <!-- ─── Logs ────────────────────────────────────────────────────── -->
     <div class="panel panel-default sshk-section">
         <div class="panel-heading">
