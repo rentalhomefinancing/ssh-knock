@@ -3,12 +3,26 @@
 # Hides SSH behind a secret 3-port knock sequence
 # Run as root
 
-set -e
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+
+# --- Rollback function ---
+rollback() {
+    echo ""
+    echo -e "${RED}Rolling back changes...${NC}"
+    if [ -f "$INSTALL_DIR/csf.conf.backup" ]; then
+        cp "$INSTALL_DIR/csf.conf.backup" /etc/csf/csf.conf
+    fi
+    if [ -f "$INSTALL_DIR/csfpost.sh.backup" ]; then
+        cp "$INSTALL_DIR/csfpost.sh.backup" /etc/csf/csfpost.sh
+    elif [ -f /etc/csf/csfpost.sh ]; then
+        sed -i '/# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh
+    fi
+    csf -r > /dev/null 2>&1 || true
+    echo -e "${YELLOW}Rolled back. SSH port $SSH_PORT should be open again.${NC}"
+}
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  SSH Knock — Port Knock Installer      ${NC}"
@@ -17,6 +31,13 @@ echo ""
 
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Error: Please run as root${NC}"
+    exit 1
+fi
+
+# Duplicate install protection
+if grep -q '# === SSH Knock' /etc/csf/csfpost.sh 2>/dev/null; then
+    echo -e "${RED}Error: SSH Knock is already installed.${NC}"
+    echo "Run ./uninstall.sh first, then reinstall."
     exit 1
 fi
 
@@ -48,14 +69,18 @@ echo "Detected SSH port: $SSH_PORT"
 read -p "SSH port to protect [$SSH_PORT]: " USER_SSH_PORT
 SSH_PORT=${USER_SSH_PORT:-$SSH_PORT}
 
+# Validate SSH port
+if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
+    echo -e "${RED}Error: Invalid port number${NC}"
+    exit 1
+fi
+
 # Generate random knock ports (high range, avoid common services)
 generate_port() {
-    local port
-    local attempts=0
+    local port attempts=0
     while true; do
-        port=$((RANDOM % 40000 + 10000))
+        port=$(shuf -i 10000-49999 -n 1 2>/dev/null || echo $((RANDOM % 40000 + 10000)))
         attempts=$((attempts + 1))
-        # Ensure port isn't in use and isn't a duplicate
         if ! ss -tlnp 2>/dev/null | grep -q ":$port " && \
            [ "$port" != "${KNOCK1:-0}" ] && [ "$port" != "${KNOCK2:-0}" ] && \
            [ "$port" != "$SSH_PORT" ]; then
@@ -63,8 +88,8 @@ generate_port() {
             return
         fi
         if [ $attempts -gt 100 ]; then
-            echo $((RANDOM % 40000 + 10000))
-            return
+            echo -e "${RED}Error: Could not find available knock ports${NC}" >&2
+            exit 1
         fi
     done
 }
@@ -123,19 +148,25 @@ if [ -f /etc/csf/csfpost.sh ]; then
 fi
 echo -e "${GREEN}OK${NC}"
 
-# Remove SSH port from CSF TCP_IN and TCP6_IN
+# Remove SSH port from CSF TCP_IN and TCP6_IN using Python for reliable CSV removal
 echo -n "Removing port $SSH_PORT from CSF allowed ports... "
-# Use sed to remove the port from the comma-separated TCP_IN/TCP6_IN lists
-# Handle: port at start, middle, or end of list
-for KEY in TCP_IN TCP6_IN; do
-    # Remove port with trailing comma (start/middle of list)
-    sed -i "s/\(${KEY} = \".*\)${SSH_PORT},\(.*\"\)/\1\2/" /etc/csf/csf.conf
-    # Remove port with leading comma (end of list)
-    sed -i "s/\(${KEY} = \".*\),${SSH_PORT}\(.*\"\)/\1\2/" /etc/csf/csf.conf
-    # Remove port if it's the only one (unlikely but handle it)
-    sed -i "s/\(${KEY} = \"\)${SSH_PORT}\(\"\)/\1\2/" /etc/csf/csf.conf
-done
+python3 -c "
+import re, sys
+port = sys.argv[1]
+with open('/etc/csf/csf.conf', 'r') as f:
+    content = f.read()
+for key in ['TCP_IN', 'TCP6_IN']:
+    def fix(m):
+        ports = [p.strip() for p in m.group(1).split(',')]
+        ports = [p for p in ports if p != port]
+        return key + ' = \"' + ','.join(ports) + '\"'
+    content = re.sub(key + r' = \"([^\"]+)\"', fix, content)
+with open('/etc/csf/csf.conf', 'w') as f:
+    f.write(content)
+" "$SSH_PORT" || { echo -e "${RED}FAILED${NC}"; rollback; exit 1; }
 echo -e "${GREEN}OK${NC}"
+
+echo -e "${YELLOW}Note: If IPv6 is enabled, verify SSH is also blocked on IPv6. The port was removed from TCP6_IN but additional manual rules may be needed.${NC}"
 
 # Add knock rules to csfpost.sh
 echo -n "Adding port knock rules... "
@@ -145,7 +176,6 @@ touch /etc/csf/csfpost.sh
 chmod 755 /etc/csf/csfpost.sh
 
 cat >> /etc/csf/csfpost.sh << KNOCKEOF
-
 # === SSH Knock — Port Knocking Rules ===
 # Managed by /opt/ssh-knock — do not edit manually
 
@@ -227,7 +257,7 @@ sed -i "s/__SSH_PORT__/$SSH_PORT/g" "$INSTALL_DIR/clients/knock.sh"
 sed -i "s/__KNOCK1__/$KNOCK1/g" "$INSTALL_DIR/clients/knock.sh"
 sed -i "s/__KNOCK2__/$KNOCK2/g" "$INSTALL_DIR/clients/knock.sh"
 sed -i "s/__KNOCK3__/$KNOCK3/g" "$INSTALL_DIR/clients/knock.sh"
-chmod 755 "$INSTALL_DIR/clients/knock.sh"
+chmod 700 "$INSTALL_DIR/clients/knock.sh"
 
 # Windows PowerShell client
 cat > "$INSTALL_DIR/clients/knock.ps1" << 'PSEOF'
@@ -284,7 +314,7 @@ for gui in knock-gui.py knock-gui.ps1; do
         sed -i "s/__KNOCK2__/$KNOCK2/g" "$INSTALL_DIR/clients/$gui"
         sed -i "s/__KNOCK3__/$KNOCK3/g" "$INSTALL_DIR/clients/$gui"
         sed -i "s/__HOSTNAME__/$(hostname)/g" "$INSTALL_DIR/clients/$gui"
-        chmod 755 "$INSTALL_DIR/clients/$gui"
+        chmod 700 "$INSTALL_DIR/clients/$gui"
     fi
 done
 
@@ -292,7 +322,11 @@ echo -e "${GREEN}OK${NC}"
 
 # Restart CSF to apply rules
 echo -n "Restarting CSF firewall... "
-csf -r > /dev/null 2>&1
+if ! csf -r > /dev/null 2>&1; then
+    echo -e "${RED}FAILED${NC}"
+    rollback
+    exit 1
+fi
 echo -e "${GREEN}OK${NC}"
 
 # Verify rules are in place
@@ -301,24 +335,36 @@ if iptables -L SSH_KNOCK -n 2>/dev/null | grep -q "$SSH_PORT"; then
     echo -e "${GREEN}OK${NC}"
 else
     echo -e "${RED}FAILED — rules not applied${NC}"
-    echo "Restoring CSF config..."
-    cp "$INSTALL_DIR/csf.conf.backup" /etc/csf/csf.conf
-    if [ -f "$INSTALL_DIR/csfpost.sh.backup" ]; then
-        cp "$INSTALL_DIR/csfpost.sh.backup" /etc/csf/csfpost.sh
-    else
-        # Remove our rules from csfpost.sh
-        sed -i '/# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh
-    fi
-    csf -r > /dev/null 2>&1
-    echo "Rolled back. SSH port $SSH_PORT should be open again."
+    rollback
     exit 1
 fi
+
+# Dead man's switch — safety net to restore SSH in 5 minutes
+SAFETY_SCRIPT="$INSTALL_DIR/safety-restore.sh"
+cat > "$SAFETY_SCRIPT" << 'SAFETYEOF'
+#!/bin/bash
+# Emergency: restore SSH access
+cp /opt/ssh-knock/csf.conf.backup /etc/csf/csf.conf
+sed -i '/# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh
+csf -r >/dev/null 2>&1
+rm -f /opt/ssh-knock/safety-restore.sh
+crontab -l 2>/dev/null | grep -v "ssh-knock.*safety" | crontab -
+SAFETYEOF
+chmod 755 "$SAFETY_SCRIPT"
+# Schedule safety restore in 5 minutes
+(crontab -l 2>/dev/null; echo "$(date -d '+5 minutes' '+%M %H %d %m *') $SAFETY_SCRIPT # ssh-knock-safety") | crontab -
 
 # Verify existing session is still alive (if we got here, it is)
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Installation Complete!                 ${NC}"
 echo -e "${GREEN}========================================${NC}"
+echo ""
+echo -e "${RED}>>> SAFETY NET ACTIVE <<<${NC}"
+echo -e "${YELLOW}SSH will be restored automatically in 5 minutes if you do not cancel.${NC}"
+echo "After testing knock successfully, cancel the safety net:"
+echo ""
+echo "  crontab -l | grep -v 'ssh-knock.*safety' | crontab -"
 echo ""
 echo -e "${RED}>>> DO NOT CLOSE THIS SSH SESSION <<<${NC}"
 echo ""
