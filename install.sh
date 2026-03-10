@@ -171,11 +171,16 @@ echo -e "${YELLOW}Note: If IPv6 is enabled, verify SSH is also blocked on IPv6. 
 # Add knock rules to csfpost.sh
 echo -n "Adding port knock rules... "
 
-# Make sure csfpost.sh exists and is executable
-touch /etc/csf/csfpost.sh
+# Make sure csfpost.sh exists, has a shebang, and is executable
+if [ ! -f /etc/csf/csfpost.sh ]; then
+    echo '#!/bin/bash' > /etc/csf/csfpost.sh
+elif ! head -1 /etc/csf/csfpost.sh | grep -q '^#!'; then
+    sed -i '1i#!/bin/bash' /etc/csf/csfpost.sh
+fi
 chmod 755 /etc/csf/csfpost.sh
 
 cat >> /etc/csf/csfpost.sh << KNOCKEOF
+
 # === SSH Knock — Port Knocking Rules ===
 # Managed by /opt/ssh-knock — do not edit manually
 
@@ -334,9 +339,30 @@ echo -n "Verifying knock rules... "
 if iptables -L SSH_KNOCK -n 2>/dev/null | grep -q "$SSH_PORT"; then
     echo -e "${GREEN}OK${NC}"
 else
-    echo -e "${RED}FAILED — rules not applied${NC}"
-    rollback
-    exit 1
+    echo -e "${YELLOW}not found after csf -r, trying manual apply...${NC}"
+    # CSF may not have executed csfpost.sh — run it directly
+    CSFPOST_ERR=$(bash /etc/csf/csfpost.sh 2>&1)
+    CSFPOST_RC=$?
+    if [ $CSFPOST_RC -ne 0 ]; then
+        echo -e "${RED}csfpost.sh failed (exit $CSFPOST_RC):${NC}"
+        echo "$CSFPOST_ERR"
+        rollback
+        exit 1
+    fi
+    # Check again
+    if iptables -L SSH_KNOCK -n 2>/dev/null | grep -q "$SSH_PORT"; then
+        echo -e "${GREEN}OK (applied manually)${NC}"
+        echo -e "${YELLOW}Note: CSF did not run csfpost.sh automatically. Rules were applied manually.${NC}"
+        echo -e "${YELLOW}They will persist across CSF restarts only if csfpost.sh is executable.${NC}"
+    else
+        echo -e "${RED}FAILED — rules not applied even after manual run${NC}"
+        # Show what iptables says for debugging
+        echo "  iptables -L SSH_KNOCK output:"
+        iptables -L SSH_KNOCK -n 2>&1 | head -10
+        echo "  csfpost.sh output: $CSFPOST_ERR"
+        rollback
+        exit 1
+    fi
 fi
 
 # Dead man's switch — safety net to restore SSH in 5 minutes
