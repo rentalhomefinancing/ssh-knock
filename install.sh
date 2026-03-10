@@ -1,6 +1,7 @@
 #!/bin/bash
 # SSH Knock — Port Knocking for CSF Firewalls
-# Hides SSH behind a secret 3-port knock sequence
+# Uses a daemon + CSF's native temp-allow (csf -ta) instead of custom iptables chains
+# CSF manages all firewall rules — we never touch iptables directly
 # Run as root
 
 RED='\033[0;31m'
@@ -8,19 +9,24 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+INSTALL_DIR="/opt/ssh-knock"
+
 # --- Rollback function ---
 rollback() {
     echo ""
     echo -e "${RED}Rolling back changes...${NC}"
+    # Stop and remove daemon
+    systemctl stop ssh-knock 2>/dev/null
+    systemctl disable ssh-knock 2>/dev/null
+    rm -f /etc/systemd/system/ssh-knock.service
+    systemctl daemon-reload 2>/dev/null
+    # Restore CSF config
     if [ -f "$INSTALL_DIR/csf.conf.backup" ]; then
         cp "$INSTALL_DIR/csf.conf.backup" /etc/csf/csf.conf
     fi
-    if [ -f "$INSTALL_DIR/csfpost.sh.backup" ]; then
-        cp "$INSTALL_DIR/csfpost.sh.backup" /etc/csf/csfpost.sh
-    elif [ -f /etc/csf/csfpost.sh ]; then
-        sed -i '/# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh
-    fi
     csf -r > /dev/null 2>&1 || true
+    # Remove safety cron
+    crontab -l 2>/dev/null | grep -v "ssh-knock" | crontab - 2>/dev/null
     echo -e "${YELLOW}Rolled back. SSH port $SSH_PORT should be open again.${NC}"
 }
 
@@ -35,8 +41,8 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Duplicate install protection
-if grep -q '# === SSH Knock' /etc/csf/csfpost.sh 2>/dev/null; then
-    echo -e "${RED}Error: SSH Knock is already installed.${NC}"
+if systemctl is-active ssh-knock >/dev/null 2>&1; then
+    echo -e "${RED}Error: SSH Knock is already running.${NC}"
     echo "Run ./uninstall.sh first, then reinstall."
     exit 1
 fi
@@ -53,13 +59,11 @@ if ! command -v csf &>/dev/null; then
     exit 1
 fi
 
-# Check iptables recent module
-if ! modprobe xt_recent 2>/dev/null; then
-    echo -e "${RED}Error: iptables 'recent' module not available${NC}"
+# Check tcpdump
+if ! command -v tcpdump &>/dev/null; then
+    echo -e "${RED}Error: tcpdump not found. Install it: yum install tcpdump${NC}"
     exit 1
 fi
-
-INSTALL_DIR="/opt/ssh-knock"
 
 # Detect SSH port
 SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
@@ -106,11 +110,11 @@ echo "  Knock timeout:   10 seconds between each knock"
 echo "  Access window:   30 seconds after successful knock"
 echo ""
 echo -e "${YELLOW}How it works:${NC}"
-echo "  1. SSH port $SSH_PORT becomes INVISIBLE to the internet"
-echo "  2. Send TCP packets to ports $KNOCK1, $KNOCK2, $KNOCK3 in order"
-echo "  3. SSH port opens for YOUR IP only, for 30 seconds"
+echo "  1. SSH port $SSH_PORT is removed from CSF allowed ports"
+echo "  2. A daemon watches for TCP packets to ports $KNOCK1, $KNOCK2, $KNOCK3"
+echo "  3. On correct knock, CSF temporarily allows YOUR IP for 30 seconds"
 echo "  4. Your current SSH session will NOT be interrupted"
-echo "  5. CSF continues to manage all other firewall rules"
+echo "  5. CSF manages ALL firewall rules — zero custom iptables"
 echo ""
 echo -e "${RED}IMPORTANT: Keep this SSH session open after install!${NC}"
 echo "Test the knock from another terminal before closing this one."
@@ -143,9 +147,6 @@ echo -e "${GREEN}OK${NC}"
 # Backup CSF config
 echo -n "Backing up CSF config... "
 cp /etc/csf/csf.conf "$INSTALL_DIR/csf.conf.backup"
-if [ -f /etc/csf/csfpost.sh ]; then
-    cp /etc/csf/csfpost.sh "$INSTALL_DIR/csfpost.sh.backup"
-fi
 echo -e "${GREEN}OK${NC}"
 
 # Remove SSH port from CSF TCP_IN and TCP6_IN using Python for reliable CSV removal
@@ -166,59 +167,124 @@ with open('/etc/csf/csf.conf', 'w') as f:
 " "$SSH_PORT" || { echo -e "${RED}FAILED${NC}"; rollback; exit 1; }
 echo -e "${GREEN}OK${NC}"
 
-echo -e "${YELLOW}Note: If IPv6 is enabled, verify SSH is also blocked on IPv6. The port was removed from TCP6_IN but additional manual rules may be needed.${NC}"
+# Install the knock daemon
+echo -n "Installing knock daemon... "
+cat > "$INSTALL_DIR/knock-daemon.sh" << 'DAEMONEOF'
+#!/bin/bash
+# SSH Knock Daemon — detects knock sequence via tcpdump, grants access via CSF
+# This daemon works WITH CSF — never touches iptables directly.
 
-# Add knock rules to csfpost.sh
-echo -n "Adding port knock rules... "
+CONFIG="/opt/ssh-knock/config"
+KNOCK1=$(grep '^KNOCK1=' "$CONFIG" | cut -d= -f2)
+KNOCK2=$(grep '^KNOCK2=' "$CONFIG" | cut -d= -f2)
+KNOCK3=$(grep '^KNOCK3=' "$CONFIG" | cut -d= -f2)
+SSH_PORT=$(grep '^SSH_PORT=' "$CONFIG" | cut -d= -f2)
+ACCESS_TIMEOUT=$(grep '^ACCESS_TIMEOUT=' "$CONFIG" | cut -d= -f2)
+KNOCK_TIMEOUT=$(grep '^KNOCK_TIMEOUT=' "$CONFIG" | cut -d= -f2)
+ACCESS_TIMEOUT=${ACCESS_TIMEOUT:-30}
+KNOCK_TIMEOUT=${KNOCK_TIMEOUT:-10}
 
-# Make sure csfpost.sh exists, has a shebang, and is executable
-if [ ! -f /etc/csf/csfpost.sh ]; then
-    echo '#!/bin/bash' > /etc/csf/csfpost.sh
-elif ! head -1 /etc/csf/csfpost.sh | grep -q '^#!'; then
-    sed -i '1i#!/bin/bash' /etc/csf/csfpost.sh
-fi
-chmod 755 /etc/csf/csfpost.sh
+LOG="/var/log/ssh-knock.log"
 
-cat >> /etc/csf/csfpost.sh << KNOCKEOF
+log() {
+    local msg="$(date '+%Y-%m-%d %H:%M:%S') $1"
+    echo "$msg" >> "$LOG"
+    logger -t ssh-knock "$1"
+}
 
-# === SSH Knock — Port Knocking Rules ===
-# Managed by /opt/ssh-knock — do not edit manually
+log "Daemon started. Knock: $KNOCK1 > $KNOCK2 > $KNOCK3, SSH port: $SSH_PORT, Window: ${ACCESS_TIMEOUT}s"
 
-# Create knock chain
-iptables -N SSH_KNOCK 2>/dev/null || iptables -F SSH_KNOCK
-iptables -I INPUT 1 -j SSH_KNOCK
+# State tracking: /tmp/ssh-knock-state/<IP> contains stage number and timestamp
+STATE_DIR="/tmp/ssh-knock-state"
+rm -rf "$STATE_DIR"
+mkdir -p "$STATE_DIR"
 
-# Create helper chains for stage advancement
-iptables -N SSH_KNOCK_S2 2>/dev/null || iptables -F SSH_KNOCK_S2
-iptables -N SSH_KNOCK_S3 2>/dev/null || iptables -F SSH_KNOCK_S3
+get_stage() {
+    local ip="$1"
+    local file="$STATE_DIR/$ip"
+    if [ -f "$file" ]; then
+        local stage ts now
+        read stage ts < "$file"
+        now=$(date +%s)
+        if [ $((now - ts)) -gt "$KNOCK_TIMEOUT" ] && [ "$stage" -gt 0 ]; then
+            rm -f "$file"
+            echo 0
+        else
+            echo "$stage"
+        fi
+    else
+        echo 0
+    fi
+}
 
-# Rule 1: Keep existing SSH sessions alive
-iptables -A SSH_KNOCK -p tcp --dport ${SSH_PORT} -m state --state ESTABLISHED,RELATED -j ACCEPT
+set_stage() {
+    local ip="$1" stage="$2"
+    if [ "$stage" = "0" ]; then
+        rm -f "$STATE_DIR/$ip"
+    else
+        echo "$stage $(date +%s)" > "$STATE_DIR/$ip"
+    fi
+}
 
-# Rule 2: Allow SSH from IPs that completed knock (30 sec window)
-iptables -A SSH_KNOCK -p tcp --dport ${SSH_PORT} -m state --state NEW -m recent --rcheck --seconds 30 --name KNOCK3 -j ACCEPT
+# Watch for SYN packets to knock ports
+# tcpdump captures at raw socket level — sees packets even if CSF drops them
+tcpdump -l -n -i any \
+    "tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack = 0 and (dst port $KNOCK1 or dst port $KNOCK2 or dst port $KNOCK3)" \
+    2>/dev/null | while IFS= read -r line; do
 
-# Rule 3: Third knock — if in KNOCK2, advance to KNOCK3
-iptables -A SSH_KNOCK -p tcp --dport ${KNOCK3} -m recent --rcheck --seconds 10 --name KNOCK2 -j SSH_KNOCK_S3
+    # Parse tcpdump output: "HH:MM:SS.xxx IP SRC.SRCPORT > DST.DSTPORT: Flags [S]..."
+    SRC=$(echo "$line" | grep -oP '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?=\.\d+\s*>)')
+    DPORT=$(echo "$line" | grep -oP '(?<=>\s)\S+' | grep -oP '\.(\d+):' | tr -d '.:')
 
-# Rule 4: Second knock — if in KNOCK1, advance to KNOCK2
-iptables -A SSH_KNOCK -p tcp --dport ${KNOCK2} -m recent --rcheck --seconds 10 --name KNOCK1 -j SSH_KNOCK_S2
+    [ -z "$SRC" ] || [ -z "$DPORT" ] && continue
 
-# Rule 5: First knock — start sequence
-iptables -A SSH_KNOCK -p tcp --dport ${KNOCK1} -m recent --set --name KNOCK1 -j DROP
+    STAGE=$(get_stage "$SRC")
 
-# Rule 6: Block all other new SSH connections
-iptables -A SSH_KNOCK -p tcp --dport ${SSH_PORT} -m state --state NEW -j DROP
+    if [ "$STAGE" = "0" ] && [ "$DPORT" = "$KNOCK1" ]; then
+        set_stage "$SRC" 1
+    elif [ "$STAGE" = "1" ] && [ "$DPORT" = "$KNOCK2" ]; then
+        set_stage "$SRC" 2
+    elif [ "$STAGE" = "2" ] && [ "$DPORT" = "$KNOCK3" ]; then
+        # Knock complete — grant temporary access via CSF
+        log "Knock complete from $SRC — granting ${ACCESS_TIMEOUT}s access"
+        csf -ta "$SRC" "$ACCESS_TIMEOUT" "ssh-knock" 2>/dev/null
+        set_stage "$SRC" 0
+    else
+        # Wrong sequence — restart if it was knock1, else reset
+        if [ "$DPORT" = "$KNOCK1" ]; then
+            set_stage "$SRC" 1
+        else
+            set_stage "$SRC" 0
+        fi
+    fi
+done
 
-# Helper: advance to stage 2
-iptables -A SSH_KNOCK_S2 -m recent --set --name KNOCK2 -j DROP
+log "Daemon stopped unexpectedly"
+DAEMONEOF
+chmod 755 "$INSTALL_DIR/knock-daemon.sh"
+echo -e "${GREEN}OK${NC}"
 
-# Helper: advance to stage 3
-iptables -A SSH_KNOCK_S3 -m recent --set --name KNOCK3 -j DROP
+# Install systemd service
+echo -n "Installing systemd service... "
+cat > /etc/systemd/system/ssh-knock.service << 'SVCEOF'
+[Unit]
+Description=SSH Knock - Port Knocking Daemon
+After=network.target csf.service lfd.service
+Wants=csf.service
 
-# === End SSH Knock ===
-KNOCKEOF
+[Service]
+Type=simple
+ExecStart=/opt/ssh-knock/knock-daemon.sh
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
 
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+systemctl daemon-reload
+systemctl enable ssh-knock >/dev/null 2>&1
 echo -e "${GREEN}OK${NC}"
 
 # Generate client scripts
@@ -325,7 +391,7 @@ done
 
 echo -e "${GREEN}OK${NC}"
 
-# Restart CSF to apply rules
+# Restart CSF to apply port removal
 echo -n "Restarting CSF firewall... "
 if ! csf -r > /dev/null 2>&1; then
     echo -e "${RED}FAILED${NC}"
@@ -334,43 +400,32 @@ if ! csf -r > /dev/null 2>&1; then
 fi
 echo -e "${GREEN}OK${NC}"
 
-# Apply knock rules — run csfpost.sh directly (CSF v14/CWP doesn't always auto-execute it)
-echo -n "Applying knock rules... "
-CSFPOST_ERR=$(bash /etc/csf/csfpost.sh 2>&1)
-CSFPOST_RC=$?
-if [ $CSFPOST_RC -ne 0 ]; then
-    echo -e "${RED}FAILED (exit $CSFPOST_RC):${NC}"
-    echo "$CSFPOST_ERR"
+# Start the knock daemon
+echo -n "Starting knock daemon... "
+if ! systemctl start ssh-knock; then
+    echo -e "${RED}FAILED${NC}"
+    journalctl -u ssh-knock --no-pager -n 5
     rollback
     exit 1
 fi
-
-# Verify rules are in place
-if iptables -L SSH_KNOCK -n 2>/dev/null | grep -q "$SSH_PORT"; then
+# Give daemon 2 seconds to start tcpdump
+sleep 2
+if systemctl is-active ssh-knock >/dev/null 2>&1; then
     echo -e "${GREEN}OK${NC}"
 else
-    echo -e "${RED}FAILED — chain created but rules not matching${NC}"
-    echo "  iptables -L SSH_KNOCK output:"
-    iptables -L SSH_KNOCK -n 2>&1 | head -10
+    echo -e "${RED}FAILED — daemon not running${NC}"
+    journalctl -u ssh-knock --no-pager -n 10
     rollback
     exit 1
 fi
 
-# Install watchdog cron — re-applies rules if CSF restart wipes them
-echo -n "Installing watchdog cron... "
-WATCHDOG="$INSTALL_DIR/watchdog.sh"
-cat > "$WATCHDOG" << 'WDEOF'
-#!/bin/bash
-# SSH Knock watchdog — re-applies rules if CSF restart wiped them
-if ! /usr/sbin/iptables -L SSH_KNOCK -n >/dev/null 2>&1; then
-    if [ -f /etc/csf/csfpost.sh ] && grep -q '# === SSH Knock' /etc/csf/csfpost.sh; then
-        /bin/bash /etc/csf/csfpost.sh >/dev/null 2>&1
-    fi
+# Verify CSF port removal
+echo -n "Verifying SSH port blocked... "
+if grep "^TCP_IN" /etc/csf/csf.conf | grep -q ",${SSH_PORT},\|,${SSH_PORT}\"\|\"${SSH_PORT},"; then
+    echo -e "${RED}FAILED — port $SSH_PORT still in TCP_IN${NC}"
+    rollback
+    exit 1
 fi
-WDEOF
-chmod 755 "$WATCHDOG"
-# Add cron entry (every minute)
-(crontab -l 2>/dev/null | grep -v 'ssh-knock.*watchdog'; echo "* * * * * $WATCHDOG # ssh-knock-watchdog") | crontab -
 echo -e "${GREEN}OK${NC}"
 
 # Dead man's switch — safety net to restore SSH in 15 minutes
@@ -378,16 +433,14 @@ SAFETY_SCRIPT="$INSTALL_DIR/safety-restore.sh"
 cat > "$SAFETY_SCRIPT" << 'SAFETYEOF'
 #!/bin/bash
 # Emergency: restore SSH access and remove all SSH Knock components
+systemctl stop ssh-knock 2>/dev/null
+systemctl disable ssh-knock 2>/dev/null
+rm -f /etc/systemd/system/ssh-knock.service
+systemctl daemon-reload 2>/dev/null
 if [ -f /opt/ssh-knock/csf.conf.backup ]; then
     cp /opt/ssh-knock/csf.conf.backup /etc/csf/csf.conf
 fi
-sed -i '/# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh 2>/dev/null
-# Remove watchdog cron and safety cron
 crontab -l 2>/dev/null | grep -v "ssh-knock" | crontab -
-# Flush knock chains
-iptables -F SSH_KNOCK 2>/dev/null; iptables -F SSH_KNOCK_S2 2>/dev/null; iptables -F SSH_KNOCK_S3 2>/dev/null
-iptables -D INPUT -j SSH_KNOCK 2>/dev/null; iptables -X SSH_KNOCK 2>/dev/null
-iptables -X SSH_KNOCK_S2 2>/dev/null; iptables -X SSH_KNOCK_S3 2>/dev/null
 csf -r >/dev/null 2>&1
 rm -f /opt/ssh-knock/safety-restore.sh
 SAFETYEOF
@@ -395,7 +448,6 @@ chmod 755 "$SAFETY_SCRIPT"
 # Schedule safety restore in 15 minutes
 (crontab -l 2>/dev/null | grep -v 'ssh-knock.*safety'; echo "$(date -d '+15 minutes' '+%M %H %d %m *') $SAFETY_SCRIPT # ssh-knock-safety") | crontab -
 
-# Verify existing session is still alive (if we got here, it is)
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Installation Complete!                 ${NC}"

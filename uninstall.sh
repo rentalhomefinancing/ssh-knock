@@ -1,6 +1,6 @@
 #!/bin/bash
 # SSH Knock — Uninstaller
-# Restores SSH to normal CSF-managed access
+# Stops daemon, restores SSH to normal CSF-managed access
 # Run as root
 
 RED='\033[0;31m'
@@ -28,8 +28,8 @@ fi
 
 INSTALL_DIR="/opt/ssh-knock"
 
-if [ ! -d "$INSTALL_DIR" ]; then
-    echo -e "${RED}Error: SSH Knock not installed ($INSTALL_DIR not found)${NC}"
+if [ ! -d "$INSTALL_DIR" ] && ! systemctl is-active ssh-knock >/dev/null 2>&1; then
+    echo -e "${RED}Error: SSH Knock not installed${NC}"
     exit 1
 fi
 
@@ -52,8 +52,8 @@ fi
 
 echo ""
 echo "This will:"
-echo "  1. Re-add SSH port to CSF allowed ports"
-echo "  2. Remove port knock rules from csfpost.sh"
+echo "  1. Stop and remove the knock daemon"
+echo "  2. Re-add SSH port to CSF allowed ports"
 echo "  3. Restart CSF firewall"
 echo "  4. Remove all SSH Knock files"
 echo ""
@@ -68,8 +68,27 @@ fi
 
 echo ""
 
-# Remove safety cron if present
+# Remove all ssh-knock crons (safety + watchdog)
 crontab -l 2>/dev/null | grep -v "ssh-knock" | crontab - 2>/dev/null || true
+
+# Stop and remove systemd service
+echo -n "Stopping knock daemon... "
+systemctl stop ssh-knock 2>/dev/null
+systemctl disable ssh-knock 2>/dev/null
+rm -f /etc/systemd/system/ssh-knock.service
+systemctl daemon-reload 2>/dev/null
+echo -e "${GREEN}OK${NC}"
+
+# Clean up temp state
+rm -rf /tmp/ssh-knock-state
+
+# Remove any CSF temp allows we created
+echo -n "Removing temporary CSF allows... "
+if [ -f /var/lib/csf/csf.tempallow ]; then
+    grep -v "ssh-knock" /var/lib/csf/csf.tempallow > /var/lib/csf/csf.tempallow.tmp 2>/dev/null
+    mv /var/lib/csf/csf.tempallow.tmp /var/lib/csf/csf.tempallow 2>/dev/null
+fi
+echo -e "${GREEN}OK${NC}"
 
 # Restore SSH port to CSF config
 echo -n "Restoring SSH port to CSF config... "
@@ -90,15 +109,13 @@ else
     echo -e "${YELLOW}No config or backup found — manually add your SSH port to TCP_IN in /etc/csf/csf.conf${NC}"
 fi
 
-# Remove knock rules from csfpost.sh
-echo -n "Removing knock rules from csfpost.sh... "
-if [ -f /etc/csf/csfpost.sh ]; then
-    # Remove the SSH Knock block and any preceding blank line
+# Also clean any leftover csfpost.sh rules from previous iptables-based installs
+if [ -f /etc/csf/csfpost.sh ] && grep -q '# === SSH Knock' /etc/csf/csfpost.sh; then
+    echo -n "Cleaning legacy csfpost.sh rules... "
     sed -i '/^$/N;/\n# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh
-    # Also catch if block starts without preceding blank line
     sed -i '/# === SSH Knock/,/# === End SSH Knock ===/d' /etc/csf/csfpost.sh
+    echo -e "${GREEN}OK${NC}"
 fi
-echo -e "${GREEN}OK${NC}"
 
 # Restart CSF
 echo -n "Restarting CSF firewall... "
@@ -107,15 +124,6 @@ if csf -r > /dev/null 2>&1; then
 else
     echo -e "${RED}FAILED — check CSF manually${NC}"
 fi
-
-# Flush our custom chains
-iptables -F SSH_KNOCK 2>/dev/null || true
-iptables -F SSH_KNOCK_S2 2>/dev/null || true
-iptables -F SSH_KNOCK_S3 2>/dev/null || true
-iptables -D INPUT -j SSH_KNOCK 2>/dev/null || true
-iptables -X SSH_KNOCK 2>/dev/null || true
-iptables -X SSH_KNOCK_S2 2>/dev/null || true
-iptables -X SSH_KNOCK_S3 2>/dev/null || true
 
 # Remove install directory
 echo -n "Removing installation files... "
