@@ -274,6 +274,20 @@ sed -i "s/__KNOCK1__/$KNOCK1/g" "$INSTALL_DIR/clients/knock.ps1"
 sed -i "s/__KNOCK2__/$KNOCK2/g" "$INSTALL_DIR/clients/knock.ps1"
 sed -i "s/__KNOCK3__/$KNOCK3/g" "$INSTALL_DIR/clients/knock.ps1"
 
+# GUI clients — copy from source repo and replace placeholders
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for gui in knock-gui.py knock-gui.ps1; do
+    if [ -f "$SCRIPT_DIR/clients/$gui" ]; then
+        cp "$SCRIPT_DIR/clients/$gui" "$INSTALL_DIR/clients/$gui"
+        sed -i "s/__SSH_PORT__/$SSH_PORT/g" "$INSTALL_DIR/clients/$gui"
+        sed -i "s/__KNOCK1__/$KNOCK1/g" "$INSTALL_DIR/clients/$gui"
+        sed -i "s/__KNOCK2__/$KNOCK2/g" "$INSTALL_DIR/clients/$gui"
+        sed -i "s/__KNOCK3__/$KNOCK3/g" "$INSTALL_DIR/clients/$gui"
+        sed -i "s/__HOSTNAME__/$(hostname)/g" "$INSTALL_DIR/clients/$gui"
+        chmod 755 "$INSTALL_DIR/clients/$gui"
+    fi
+done
+
 echo -e "${GREEN}OK${NC}"
 
 # Restart CSF to apply rules
